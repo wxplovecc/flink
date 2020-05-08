@@ -33,6 +33,7 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.viewfs.ViewFileSystem;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.util.VersionInfo;
 
@@ -64,10 +65,7 @@ class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream 
 
 	private final FSDataOutputStream out;
 
-	HadoopRecoverableFsDataOutputStream(
-			FileSystem fs,
-			Path targetFile,
-			Path tempFile) throws IOException {
+	HadoopRecoverableFsDataOutputStream(FileSystem fs, Path targetFile, Path tempFile) throws IOException {
 
 		ensureTruncateInitialized();
 
@@ -77,9 +75,7 @@ class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream 
 		this.out = fs.create(tempFile);
 	}
 
-	HadoopRecoverableFsDataOutputStream(
-			FileSystem fs,
-			HadoopFsRecoverable recoverable) throws IOException {
+	HadoopRecoverableFsDataOutputStream(FileSystem fs, HadoopFsRecoverable recoverable) throws IOException {
 
 		ensureTruncateInitialized();
 
@@ -95,8 +91,8 @@ class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream 
 		long pos = out.getPos();
 		if (pos != recoverable.offset()) {
 			IOUtils.closeQuietly(out);
-			throw new IOException("Truncate failed: " + tempFile +
-					" (requested=" + recoverable.offset() + " ,size=" + pos + ')');
+			throw new IOException(
+					"Truncate failed: " + tempFile + " (requested=" + recoverable.offset() + " ,size=" + pos + ')');
 		}
 	}
 
@@ -145,19 +141,17 @@ class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream 
 	}
 
 	// ------------------------------------------------------------------------
-	//  Reflection utils for truncation
-	//    These are needed to compile against Hadoop versions before
-	//    Hadoop 2.7, which have no truncation calls for HDFS.
+	// Reflection utils for truncation
+	// These are needed to compile against Hadoop versions before
+	// Hadoop 2.7, which have no truncation calls for HDFS.
 	// ------------------------------------------------------------------------
 
-	private static void safelyTruncateFile(
-			final FileSystem fileSystem,
-			final Path path,
+	private static void safelyTruncateFile(final FileSystem fileSystem, final Path path,
 			final HadoopFsRecoverable recoverable) throws IOException {
 
 		ensureTruncateInitialized();
 
-		waitUntilLeaseIsRevoked(fileSystem, path);
+		revokeLeaseByFileSystem(fileSystem, path);
 
 		// truncate back and append
 		boolean truncated;
@@ -170,7 +164,7 @@ class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream 
 		if (!truncated) {
 			// Truncate did not complete immediately, we must wait for
 			// the operation to complete and release the lease.
-			waitUntilLeaseIsRevoked(fileSystem, path);
+			revokeLeaseByFileSystem(fileSystem, path);
 		}
 	}
 
@@ -179,8 +173,7 @@ class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream 
 			Method truncateMethod;
 			try {
 				truncateMethod = FileSystem.class.getMethod("truncate", Path.class, long.class);
-			}
-			catch (NoSuchMethodException e) {
+			} catch (NoSuchMethodException e) {
 				throw new FlinkRuntimeException("Could not find a public truncate method on the Hadoop File System.");
 			}
 
@@ -194,36 +187,35 @@ class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream 
 
 	private static boolean truncate(final FileSystem hadoopFs, final Path file, final long length) throws IOException {
 		if (!HadoopUtils.isMinHadoopVersion(2, 7)) {
-			throw new IllegalStateException("Truncation is not available in hadoop version < 2.7 , You are on Hadoop " + VersionInfo.getVersion());
+			throw new IllegalStateException("Truncation is not available in hadoop version < 2.7 , You are on Hadoop "
+					+ VersionInfo.getVersion());
 		}
 
 		if (truncateHandle != null) {
 			try {
 				return (Boolean) truncateHandle.invoke(hadoopFs, file, length);
-			}
-			catch (InvocationTargetException e) {
+			} catch (InvocationTargetException e) {
 				ExceptionUtils.rethrowIOException(e.getTargetException());
-			}
-			catch (Throwable t) {
+			} catch (Throwable t) {
 				throw new IOException(
-						"Truncation of file failed because of access/linking problems with Hadoop's truncate call. " +
-								"This is most likely a dependency conflict or class loading problem.");
+						"Truncation of file failed because of access/linking problems with Hadoop's truncate call. "
+								+ "This is most likely a dependency conflict or class loading problem.");
 			}
-		}
-		else {
+		} else {
 			throw new IllegalStateException("Truncation handle has not been initialized");
 		}
 		return false;
 	}
 
 	// ------------------------------------------------------------------------
-	//  Committer
+	// Committer
 	// ------------------------------------------------------------------------
 
 	/**
-	 * Implementation of a committer for the Hadoop File System abstraction.
-	 * This implementation commits by renaming the temp file to the final file path.
-	 * The temp file is truncated before renaming in case there is trailing garbage data.
+	 * Implementation of a committer for the Hadoop File System abstraction. This
+	 * implementation commits by renaming the temp file to the final file path. The
+	 * temp file is truncated before renaming in case there is trailing garbage
+	 * data.
 	 */
 	static class HadoopFsCommitter implements Committer {
 
@@ -244,8 +236,7 @@ class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream 
 			final FileStatus srcStatus;
 			try {
 				srcStatus = fs.getFileStatus(src);
-			}
-			catch (IOException e) {
+			} catch (IOException e) {
 				throw new IOException("Cannot clean commit: Staging file does not exist.");
 			}
 
@@ -257,8 +248,7 @@ class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream 
 
 			try {
 				fs.rename(src, dest);
-			}
-			catch (IOException e) {
+			} catch (IOException e) {
 				throw new IOException("Committing file by rename failed: " + src + " to " + dest, e);
 			}
 		}
@@ -272,11 +262,9 @@ class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream 
 			FileStatus srcStatus = null;
 			try {
 				srcStatus = fs.getFileStatus(src);
-			}
-			catch (FileNotFoundException e) {
+			} catch (FileNotFoundException e) {
 				// status remains null
-			}
-			catch (IOException e) {
+			} catch (IOException e) {
 				throw new IOException("Committing during recovery failed: Could not access status of source file.");
 			}
 
@@ -290,16 +278,14 @@ class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream 
 				// rename to final location (if it exists, overwrite it)
 				try {
 					fs.rename(src, dest);
-				}
-				catch (IOException e) {
+				} catch (IOException e) {
 					throw new IOException("Committing file by rename failed: " + src + " to " + dest, e);
 				}
-			}
-			else if (!fs.exists(dest)) {
+			} else if (!fs.exists(dest)) {
 				// neither exists - that can be a sign of
-				//   - (1) a serious problem (file system loss of data)
-				//   - (2) a recovery of a savepoint that is some time old and the users
-				//         removed the files in the meantime.
+				// - (1) a serious problem (file system loss of data)
+				// - (2) a recovery of a savepoint that is some time old and the users
+				// removed the files in the meantime.
 
 				// TODO how to handle this?
 				// We probably need an option for users whether this should log,
@@ -314,19 +300,42 @@ class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream 
 	}
 
 	/**
-	 * Called when resuming execution after a failure and waits until the lease
-	 * of the file we are resuming is free.
+	 * revoke the lease of the file we are resuming with different FileSystem.
 	 *
-	 * <p>The lease of the file we are resuming writing/committing to may still
-	 * belong to the process that failed previously and whose state we are
-	 * recovering.
+	 * <p>
+	 * resolve the real path of FileSystem if it is ViewFileSystem .
+	 * 
 	 *
 	 * @param path The path to the file we want to resume writing to.
 	 */
-	private static boolean waitUntilLeaseIsRevoked(final FileSystem fs, final Path path) throws IOException {
+	private static boolean revokeLeaseByFileSystem(final FileSystem fs, final Path path) throws IOException {
+		if (fs instanceof ViewFileSystem) {
+			final ViewFileSystem vfs = (ViewFileSystem) fs;
+			final Path resolvePath = vfs.resolvePath(path);
+			final FileSystem resolveFs = resolvePath.getFileSystem(fs.getConf());
+
+			Preconditions.checkState(resolveFs instanceof DistributedFileSystem);
+			final DistributedFileSystem dfs = (DistributedFileSystem) resolveFs;
+			return waitUntilLeaseIsRevoked(dfs, resolvePath);
+		}
 		Preconditions.checkState(fs instanceof DistributedFileSystem);
 
 		final DistributedFileSystem dfs = (DistributedFileSystem) fs;
+		return waitUntilLeaseIsRevoked(dfs, path);
+	}
+
+	/**
+	 * Called when resuming execution after a failure and waits until the lease of
+	 * the file we are resuming is free.
+	 *
+	 * <p>
+	 * The lease of the file we are resuming writing/committing to may still belong
+	 * to the process that failed previously and whose state we are recovering.
+	 *
+	 * @param path The path to the file we want to resume writing to.
+	 */
+	private static boolean waitUntilLeaseIsRevoked(final DistributedFileSystem dfs, final Path path)
+			throws IOException {
 		dfs.recoverLease(path);
 
 		final Deadline deadline = Deadline.now().plus(Duration.ofMillis(LEASE_TIMEOUT));
